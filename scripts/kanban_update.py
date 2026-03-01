@@ -61,13 +61,19 @@ _AGENT_LABELS = {
     'gongbu': '工部', 'libu_hr': '吏部', 'zaochao': '钦天监',
 }
 
+MAX_PROGRESS_LOG = 100  # 单任务最大进展日志条数
+
 def load():
     return atomic_json_read(TASKS_FILE, [])
 
 def save(tasks):
     atomic_json_write(TASKS_FILE, tasks)
-    # 触发刷新
-    subprocess.run(['python3', str(REFRESH_SCRIPT)], capture_output=True)
+    # 异步触发刷新，不阻塞调用方
+    try:
+        subprocess.Popen(['python3', str(REFRESH_SCRIPT)],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
@@ -84,9 +90,8 @@ _JUNK_TITLES = {
     '你去开启', '测试', '试试', '看看',
 }
 
-def _sanitize_title(raw):
-    """清洗标题：剥离文件路径、URL、Conversation 元数据、传旨前缀、截断过长内容。"""
-    import re
+def _sanitize_text(raw, max_len=80):
+    """清洗文本：剥离文件路径、URL、Conversation 元数据、传旨前缀、截断过长内容。"""
     t = (raw or '').strip()
     # 1) 剥离 Conversation info / Conversation 后面的所有内容
     t = re.split(r'\n*Conversation\b', t, maxsplit=1)[0].strip()
@@ -102,26 +107,20 @@ def _sanitize_title(raw):
     t = re.sub(r'(message_id|session_id|chat_id|open_id|user_id|tenant_key)\s*[:=]\s*\S+', '', t)
     # 7) 合并多余空白
     t = re.sub(r'\s+', ' ', t).strip()
-    # 8) 截断过长标题
-    if len(t) > 80:
-        t = t[:80] + '…'
+    # 8) 截断过长内容
+    if len(t) > max_len:
+        t = t[:max_len] + '…'
     return t
+
+
+def _sanitize_title(raw):
+    """清洗标题（最长 80 字符）。"""
+    return _sanitize_text(raw, 80)
 
 
 def _sanitize_remark(raw):
-    """清洗流转备注：与标题相同的清洗策略。"""
-    import re
-    t = (raw or '').strip()
-    t = re.split(r'\n*Conversation\b', t, maxsplit=1)[0].strip()
-    t = re.sub(r'[/\\.~][A-Za-z0-9_\-./]+(?:\.(?:py|js|ts|json|md|sh|yaml|yml|txt|csv|html|css|log))?', '', t)
-    t = re.sub(r'https?://\S+', '', t)
-    # 剥离"下旨（xxx）："前缀
-    t = re.sub(r'^(传旨|下旨)([（(][^)）]*[)）])?[：:\uff1a]\s*', '', t)
-    t = re.sub(r'(message_id|session_id|chat_id|open_id|user_id|tenant_key)\s*[:=]\s*\S+', '', t)
-    t = re.sub(r'\s+', ' ', t).strip()
-    if len(t) > 120:
-        t = t[:120] + '…'
-    return t
+    """清洗流转备注（最长 120 字符）。"""
+    return _sanitize_text(raw, 120)
 
 
 def _infer_agent_id_from_runtime(task=None):
@@ -154,7 +153,6 @@ def _infer_agent_id_from_runtime(task=None):
 
 def _is_valid_task_title(title):
     """校验标题是否足够作为一个旨意任务。"""
-    import re
     t = (title or '').strip()
     if len(t) < _MIN_TITLE_LEN:
         return False, f'标题过短（{len(t)}<{_MIN_TITLE_LEN}字），疑似非旨意'
@@ -182,119 +180,104 @@ def cmd_create(task_id, title, state, org, official, remark=None):
         log.warning(f'⚠️ 拒绝创建 {task_id}：{reason}')
         print(f'[看板] 拒绝创建：{reason}', flush=True)
         return
-    tasks = load()
-    existing = next((t for t in tasks if t.get('id') == task_id), None)
-    if existing:
-        if existing.get('state') in ('Done', 'Cancelled'):
-            log.warning(f'⚠️ 任务 {task_id} 已完结 (state={existing["state"]})，不可覆盖，请使用新ID')
-            print(f'[看板] 拒绝：任务 {task_id} 已 {existing["state"]}，请用新的 JJC ID', flush=True)
-            return
-        if existing.get('state') not in (None, '', 'Inbox', 'Pending'):
-            log.warning(f'任务 {task_id} 已存在 (state={existing["state"]})，将被覆盖')
-    tasks = [t for t in tasks if t.get('id') != task_id]  # 去重
-    # 根据 state 推导正确的 org，忽略调用者可能传来的错误 org
     actual_org = STATE_ORG_MAP.get(state, org)
     clean_remark = _sanitize_remark(remark) if remark else f"下旨：{title}"
-    flow_log = [{
-        "at": now_iso(),
-        "from": "皇上",
-        "to": actual_org,
-        "remark": clean_remark
-    }]
-    tasks.insert(0, {
-        "id": task_id,
-        "title": title,
-        "official": official,
-        "org": actual_org,
-        "state": state,
-        "now": clean_remark[:60] if remark else f"已下旨，等待{actual_org}接旨",
-        "eta": "-",
-        "block": "无",
-        "output": "",
-        "ac": "",
-        "flow_log": flow_log,
-        "updatedAt": now_iso()
-    })
-    save(tasks)
+    def modifier(tasks):
+        existing = next((t for t in tasks if t.get('id') == task_id), None)
+        if existing:
+            if existing.get('state') in ('Done', 'Cancelled'):
+                log.warning(f'⚠️ 任务 {task_id} 已完结 (state={existing["state"]})，不可覆盖')
+                return tasks
+            if existing.get('state') not in (None, '', 'Inbox', 'Pending'):
+                log.warning(f'任务 {task_id} 已存在 (state={existing["state"]})，将被覆盖')
+        tasks = [t for t in tasks if t.get('id') != task_id]
+        tasks.insert(0, {
+            "id": task_id, "title": title, "official": official,
+            "org": actual_org, "state": state,
+            "now": clean_remark[:60] if remark else f"已下旨，等待{actual_org}接旨",
+            "eta": "-", "block": "无", "output": "", "ac": "",
+            "flow_log": [{"at": now_iso(), "from": "皇上", "to": actual_org, "remark": clean_remark}],
+            "updatedAt": now_iso()
+        })
+        return tasks
+    atomic_json_update(TASKS_FILE, modifier, [])
+    save(load())  # trigger refresh
     log.info(f'✅ 创建 {task_id} | {title[:30]} | state={state}')
 
 
 def cmd_state(task_id, new_state, now_text=None):
-    """更新任务状态"""
-    tasks = load()
-    t = find_task(tasks, task_id)
-    if not t:
-        log.error(f'任务 {task_id} 不存在')
-        return
-    old_state = t['state']
-    t['state'] = new_state
-    # 自动同步 org 到对应部门
-    if new_state in STATE_ORG_MAP:
-        t['org'] = STATE_ORG_MAP[new_state]
-    if now_text:
-        t['now'] = now_text
-    t['updatedAt'] = now_iso()
-    save(tasks)
-    log.info(f'✅ {task_id} 状态更新: {old_state} → {new_state}')
+    """更新任务状态（原子操作）"""
+    old_state = [None]
+    def modifier(tasks):
+        t = find_task(tasks, task_id)
+        if not t:
+            log.error(f'任务 {task_id} 不存在')
+            return tasks
+        old_state[0] = t['state']
+        t['state'] = new_state
+        if new_state in STATE_ORG_MAP:
+            t['org'] = STATE_ORG_MAP[new_state]
+        if now_text:
+            t['now'] = now_text
+        t['updatedAt'] = now_iso()
+        return tasks
+    atomic_json_update(TASKS_FILE, modifier, [])
+    save(load())  # trigger refresh
+    log.info(f'✅ {task_id} 状态更新: {old_state[0]} → {new_state}')
 
 
 def cmd_flow(task_id, from_dept, to_dept, remark):
-    """添加流转记录"""
-    tasks = load()
-    t = find_task(tasks, task_id)
-    if not t:
-        log.error(f'任务 {task_id} 不存在')
-        return
-    if 'flow_log' not in t:
-        t['flow_log'] = []
+    """添加流转记录（原子操作）"""
     clean_remark = _sanitize_remark(remark)
-    t['flow_log'].append({
-        "at": now_iso(),
-        "from": from_dept,
-        "to": to_dept,
-        "remark": clean_remark
-    })
-    # 不覆盖 now —— now 由 progress/state/done 管理
-    # flow 只记录流转日志，不影响当前进展文本
-    t['updatedAt'] = now_iso()
-    save(tasks)
+    def modifier(tasks):
+        t = find_task(tasks, task_id)
+        if not t:
+            log.error(f'任务 {task_id} 不存在')
+            return tasks
+        t.setdefault('flow_log', []).append({
+            "at": now_iso(), "from": from_dept, "to": to_dept, "remark": clean_remark
+        })
+        t['updatedAt'] = now_iso()
+        return tasks
+    atomic_json_update(TASKS_FILE, modifier, [])
+    save(load())  # trigger refresh
     log.info(f'✅ {task_id} 流转记录: {from_dept} → {to_dept}')
 
 
 def cmd_done(task_id, output_path='', summary=''):
-    """标记任务完成"""
-    tasks = load()
-    t = find_task(tasks, task_id)
-    if not t:
-        log.error(f'任务 {task_id} 不存在')
-        return
-    t['state'] = 'Done'
-    t['output'] = output_path
-    t['now'] = summary or '任务已完成'
-    if 'flow_log' not in t:
-        t['flow_log'] = []
-    t['flow_log'].append({
-        "at": now_iso(),
-        "from": t.get('org', '执行部门'),
-        "to": "皇上",
-        "remark": f"✅ 完成：{summary or '任务已完成'}"
-    })
-    t['updatedAt'] = now_iso()
-    save(tasks)
+    """标记任务完成（原子操作）"""
+    def modifier(tasks):
+        t = find_task(tasks, task_id)
+        if not t:
+            log.error(f'任务 {task_id} 不存在')
+            return tasks
+        t['state'] = 'Done'
+        t['output'] = output_path
+        t['now'] = summary or '任务已完成'
+        t.setdefault('flow_log', []).append({
+            "at": now_iso(), "from": t.get('org', '执行部门'),
+            "to": "皇上", "remark": f"✅ 完成：{summary or '任务已完成'}"
+        })
+        t['updatedAt'] = now_iso()
+        return tasks
+    atomic_json_update(TASKS_FILE, modifier, [])
+    save(load())  # trigger refresh
     log.info(f'✅ {task_id} 已完成')
 
 
 def cmd_block(task_id, reason):
-    """标记阻塞"""
-    tasks = load()
-    t = find_task(tasks, task_id)
-    if not t:
-        log.error(f'任务 {task_id} 不存在')
-        return
-    t['state'] = 'Blocked'
-    t['block'] = reason
-    t['updatedAt'] = now_iso()
-    save(tasks)
+    """标记阻塞（原子操作）"""
+    def modifier(tasks):
+        t = find_task(tasks, task_id)
+        if not t:
+            log.error(f'任务 {task_id} 不存在')
+            return tasks
+        t['state'] = 'Blocked'
+        t['block'] = reason
+        t['updatedAt'] = now_iso()
+        return tasks
+    atomic_json_update(TASKS_FILE, modifier, [])
+    save(load())  # trigger refresh
     log.warning(f'⚠️ {task_id} 已阻塞: {reason}')
 
 
@@ -308,16 +291,7 @@ def cmd_progress(task_id, now_text, todos_pipe=''):
         - 以 🔄 结尾 → in-progress
         - 其他 → not-started
     """
-    tasks = load()
-    t = find_task(tasks, task_id)
-    if not t:
-        log.error(f'任务 {task_id} 不存在')
-        return
-
-    # 更新 now（实时状态描述，兼容旧版读取）
     clean = _sanitize_remark(now_text)
-    t['now'] = clean
-
     # 解析 todos_pipe
     parsed_todos = None
     if todos_pipe:
@@ -338,61 +312,68 @@ def cmd_progress(task_id, now_text, todos_pipe=''):
             new_todos.append({'id': str(i), 'title': title, 'status': status})
         if new_todos:
             parsed_todos = new_todos
-            t['todos'] = new_todos
 
-    # 多 Agent 并行进展日志（新增）
-    at = now_iso()
-    agent_id = _infer_agent_id_from_runtime(t)
-    agent_label = _AGENT_LABELS.get(agent_id, agent_id)
-    log_todos = parsed_todos if parsed_todos is not None else t.get('todos', [])
-    t.setdefault('progress_log', []).append({
-        'at': at,
-        'agent': agent_id,
-        'agentLabel': agent_label,
-        'text': clean,
-        'todos': log_todos,
-        'state': t.get('state', ''),
-        'org': t.get('org', ''),
-    })
-
-    t['updatedAt'] = at
-    save(tasks)
-
-    done_cnt = sum(1 for td in t.get('todos', []) if td.get('status') == 'completed')
-    total_cnt = len(t.get('todos', []))
-    log.info(f'📡 {task_id} 进展: {clean[:40]}... [{done_cnt}/{total_cnt}]')
+    done_cnt = [0]
+    total_cnt = [0]
+    def modifier(tasks):
+        t = find_task(tasks, task_id)
+        if not t:
+            log.error(f'任务 {task_id} 不存在')
+            return tasks
+        t['now'] = clean
+        if parsed_todos is not None:
+            t['todos'] = parsed_todos
+        # 多 Agent 并行进展日志
+        at = now_iso()
+        agent_id = _infer_agent_id_from_runtime(t)
+        agent_label = _AGENT_LABELS.get(agent_id, agent_id)
+        log_todos = parsed_todos if parsed_todos is not None else t.get('todos', [])
+        t.setdefault('progress_log', []).append({
+            'at': at, 'agent': agent_id, 'agentLabel': agent_label,
+            'text': clean, 'todos': log_todos,
+            'state': t.get('state', ''), 'org': t.get('org', ''),
+        })
+        # 限制 progress_log 大小，防止无限增长
+        if len(t['progress_log']) > MAX_PROGRESS_LOG:
+            t['progress_log'] = t['progress_log'][-MAX_PROGRESS_LOG:]
+        t['updatedAt'] = at
+        done_cnt[0] = sum(1 for td in t.get('todos', []) if td.get('status') == 'completed')
+        total_cnt[0] = len(t.get('todos', []))
+        return tasks
+    atomic_json_update(TASKS_FILE, modifier, [])
+    save(load())  # trigger refresh
+    log.info(f'📡 {task_id} 进展: {clean[:40]}... [{done_cnt[0]}/{total_cnt[0]}]')
 
 def cmd_todo(task_id, todo_id, title, status='not-started'):
-    """添加或更新子任务 todo
+    """添加或更新子任务 todo（原子操作）
 
     status: not-started / in-progress / completed
     """
-    tasks = load()
-    t = find_task(tasks, task_id)
-    if not t:
-        log.error(f'任务 {task_id} 不存在')
-        return
-    if 'todos' not in t:
-        t['todos'] = []
-
-    existing = next((td for td in t['todos'] if str(td.get('id')) == str(todo_id)), None)
-    if existing:
-        existing['status'] = status
-        if title:
-            existing['title'] = title
-    else:
-        t['todos'].append({
-            'id': todo_id,
-            'title': title,
-            'status': status,
-        })
-
-    t['updatedAt'] = now_iso()
-    save(tasks)
-
-    done = sum(1 for td in t['todos'] if td.get('status') == 'completed')
-    total = len(t['todos'])
-    log.info(f'✅ {task_id} todo [{done}/{total}]: {todo_id} → {status}')
+    # 校验 status 值
+    if status not in ('not-started', 'in-progress', 'completed'):
+        status = 'not-started'
+    result_info = [0, 0]
+    def modifier(tasks):
+        t = find_task(tasks, task_id)
+        if not t:
+            log.error(f'任务 {task_id} 不存在')
+            return tasks
+        if 'todos' not in t:
+            t['todos'] = []
+        existing = next((td for td in t['todos'] if str(td.get('id')) == str(todo_id)), None)
+        if existing:
+            existing['status'] = status
+            if title:
+                existing['title'] = title
+        else:
+            t['todos'].append({'id': todo_id, 'title': title, 'status': status})
+        t['updatedAt'] = now_iso()
+        result_info[0] = sum(1 for td in t['todos'] if td.get('status') == 'completed')
+        result_info[1] = len(t['todos'])
+        return tasks
+    atomic_json_update(TASKS_FILE, modifier, [])
+    save(load())  # trigger refresh
+    log.info(f'✅ {task_id} todo [{result_info[0]}/{result_info[1]}]: {todo_id} → {status}')
 
 _CMD_MIN_ARGS = {
     'create': 6, 'state': 3, 'flow': 5, 'done': 2, 'block': 3, 'todo': 4, 'progress': 3,

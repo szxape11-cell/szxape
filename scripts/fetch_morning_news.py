@@ -7,6 +7,7 @@
 import json, pathlib, datetime, subprocess, re, sys, os, logging
 from xml.etree import ElementTree as ET
 from file_lock import atomic_json_write
+from utils import validate_url
 
 log = logging.getLogger('朝报')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s', datefmt='%H:%M:%S')
@@ -57,11 +58,27 @@ def curl_rss(url, timeout=10):
     except Exception:
         return ''
 
+def _safe_parse_xml(xml_text, max_size=5*1024*1024):
+    """安全解析 XML：限制大小，禁用外部实体（防 XXE）。"""
+    if len(xml_text) > max_size:
+        log.warning(f'XML 内容过大 ({len(xml_text)} bytes)，跳过')
+        return None
+    # 剥离 DOCTYPE / ENTITY 声明以防 XXE
+    cleaned = re.sub(r'<!DOCTYPE[^>]*>', '', xml_text, flags=re.IGNORECASE)
+    cleaned = re.sub(r'<!ENTITY[^>]*>', '', cleaned, flags=re.IGNORECASE)
+    try:
+        return ET.fromstring(cleaned)
+    except ET.ParseError:
+        return None
+
+
 def parse_rss(xml_text):
     """解析 RSS XML → list of {title, desc, link, pub_date, image}"""
     items = []
     try:
-        root = ET.fromstring(xml_text)
+        root = _safe_parse_xml(xml_text)
+        if root is None:
+            return items
         # RSS 2.0
         ns = {'media': 'http://search.yahoo.com/mrss/'}
         for item in root.findall('.//item')[:8]:
@@ -140,7 +157,7 @@ def main():
         if age < 3600:  # 1小时内不重复
             log.info(f'今日已采集（{today}），跳过（使用 --force 强制采集）')
             return
-    lock_file.touch()
+    # 注意：lock 放到采集成功后再 touch，防止失败也锁定
 
     # 读取用户配置
     config_file = DATA / 'morning_brief_config.json'
@@ -170,8 +187,13 @@ def main():
             merged_feeds[cat] = list(feeds)
     for cf in custom_feeds:
         cat = cf.get('category', '')
-        if cat in enabled_cats:
-            merged_feeds.setdefault(cat, []).append((cf.get('name', '自定义'), cf.get('url', '')))
+        feed_url = cf.get('url', '')
+        if cat in enabled_cats and feed_url:
+            # 校验自定义源 URL（SSRF 防护）
+            if validate_url(feed_url):
+                merged_feeds.setdefault(cat, []).append((cf.get('name', '自定义'), feed_url))
+            else:
+                log.warning(f'自定义源 URL 不合法，跳过: {feed_url}')
 
     log.info(f'开始采集 {today}...')
     log.info(f'  启用分类: {", ".join(enabled_cats)}')
@@ -211,7 +233,8 @@ def main():
     total = sum(len(v) for v in result['categories'].values())
     log.info(f'✅ 完成：共 {total} 条新闻 → {today_file.name}')
 
-    # 保留锁文件作为幂等性守卫（不删除）
+    # 采集成功后才写入幂等锁
+    lock_file.touch()
 
 if __name__ == '__main__':
     main()

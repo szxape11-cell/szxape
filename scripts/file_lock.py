@@ -81,5 +81,24 @@ def atomic_json_update(
 
 
 def atomic_json_write(path: pathlib.Path, data: Any) -> None:
-    """原子写入 JSON 文件（持排他锁 + tmpfile rename）。"""
-    atomic_json_update(path, lambda _: data)
+    """原子写入 JSON 文件（持排他锁 + tmpfile rename）。
+    直接写入，不读取现有内容（避免 atomic_json_update 的多余读开销）。
+    """
+    lock_file = _lock_path(path)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=str(path.parent), suffix='.tmp', prefix=path.stem + '_'
+        )
+        try:
+            with os.fdopen(tmp_fd, 'w') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, str(path))
+        except Exception:
+            os.unlink(tmp_path)
+            raise
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)

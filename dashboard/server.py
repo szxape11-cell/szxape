@@ -27,7 +27,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message
 
 OCLAW_HOME = pathlib.Path.home() / '.openclaw'
 MAX_REQUEST_BODY = 1 * 1024 * 1024  # 1 MB
-ALLOWED_ORIGIN = None  # Set via --cors; None means reflect request origin (dev mode)
+ALLOWED_ORIGIN = None  # Set via --cors; None means restrict to localhost
+_DEFAULT_ORIGINS = {'http://127.0.0.1:7891', 'http://localhost:7891'}
 _SAFE_NAME_RE = re.compile(r'^[a-zA-Z0-9_\-\u4e00-\u9fff]+$')
 
 BASE = pathlib.Path(__file__).parent
@@ -43,7 +44,13 @@ def read_json(path, default=None):
 
 
 def cors_headers(h):
-    origin = ALLOWED_ORIGIN or h.headers.get('Origin', '*')
+    req_origin = h.headers.get('Origin', '')
+    if ALLOWED_ORIGIN:
+        origin = ALLOWED_ORIGIN
+    elif req_origin in _DEFAULT_ORIGINS:
+        origin = req_origin
+    else:
+        origin = 'http://127.0.0.1:7891'
     h.send_header('Access-Control-Allow-Origin', origin)
     h.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
     h.send_header('Access-Control-Allow-Headers', 'Content-Type')
@@ -59,11 +66,13 @@ def load_tasks():
 
 def save_tasks(tasks):
     atomic_json_write(DATA / 'tasks_source.json', tasks)
-    # Trigger refresh
-    try:
-        subprocess.Popen(['python3', str(SCRIPTS / 'refresh_live_data.py')])
-    except Exception as e:
-        log.warning(f'refresh_live_data.py 触发失败: {e}')
+    # Trigger refresh (异步，不阻塞，避免僵尸进程)
+    def _refresh():
+        try:
+            subprocess.run(['python3', str(SCRIPTS / 'refresh_live_data.py')], timeout=30)
+        except Exception as e:
+            log.warning(f'refresh_live_data.py 触发失败: {e}')
+    threading.Thread(target=_refresh, daemon=True).start()
 
 
 def handle_task_action(task_id, action, reason):
@@ -146,6 +155,9 @@ def update_task_todos(task_id, todos):
 
 def read_skill_content(agent_id, skill_name):
     """Read SKILL.md content for a specific skill."""
+    # 输入校验：防止路径遍历
+    if not _SAFE_NAME_RE.match(agent_id) or not _SAFE_NAME_RE.match(skill_name):
+        return {'ok': False, 'error': '参数含非法字符'}
     cfg = read_json(DATA / 'agent_config.json', {})
     agents = cfg.get('agents', [])
     ag = next((a for a in agents if a.get('id') == agent_id), None)
@@ -154,7 +166,11 @@ def read_skill_content(agent_id, skill_name):
     sk = next((s for s in ag.get('skills', []) if s.get('name') == skill_name), None)
     if not sk:
         return {'ok': False, 'error': f'技能 {skill_name} 不存在'}
-    skill_path = pathlib.Path(sk.get('path', ''))
+    skill_path = pathlib.Path(sk.get('path', '')).resolve()
+    # 路径遍历保护：确保路径在 OCLAW_HOME 或项目目录下
+    allowed_roots = (OCLAW_HOME.resolve(), BASE.parent.resolve())
+    if not any(str(skill_path).startswith(str(root)) for root in allowed_roots):
+        return {'ok': False, 'error': '路径不在允许的目录范围内'}
     if not skill_path.exists():
         return {'ok': True, 'name': skill_name, 'agent': agent_id, 'content': '(SKILL.md 文件不存在)', 'path': str(skill_path)}
     try:
@@ -1095,6 +1111,17 @@ class Handler(BaseHTTPRequestHandler):
             if not task_id:
                 self.send_json({'ok': False, 'error': 'taskId required'}, 400)
                 return
+            # todos 输入校验
+            if not isinstance(todos, list) or len(todos) > 200:
+                self.send_json({'ok': False, 'error': 'todos must be a list (max 200 items)'}, 400)
+                return
+            valid_statuses = {'not-started', 'in-progress', 'completed'}
+            for td in todos:
+                if not isinstance(td, dict) or 'id' not in td or 'title' not in td:
+                    self.send_json({'ok': False, 'error': 'each todo must have id and title'}, 400)
+                    return
+                if td.get('status', 'not-started') not in valid_statuses:
+                    td['status'] = 'not-started'
             result = update_task_todos(task_id, todos)
             self.send_json(result)
             return
@@ -1142,16 +1169,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({'ok': False, 'error': 'agentId and model required'}, 400)
                 return
 
-            # Write to pending
+            # Write to pending (atomic)
             pending_path = DATA / 'pending_model_changes.json'
-            pending = []
-            try:
-                pending = json.loads(pending_path.read_text())
-            except Exception:
-                pass
-            pending = [x for x in pending if x.get('agentId') != agent_id]
-            pending.append({'agentId': agent_id, 'model': model})
-            pending_path.write_text(json.dumps(pending, ensure_ascii=False, indent=2))
+            def update_pending(current):
+                current = [x for x in current if x.get('agentId') != agent_id]
+                current.append({'agentId': agent_id, 'model': model})
+                return current
+            atomic_json_update(pending_path, update_pending, [])
 
             # Async apply
             def apply_async():
