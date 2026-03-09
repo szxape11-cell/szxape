@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-三省六部 · 看板本地 API 服务器
+三智能体 · 看板本地 API 服务器
 Port: 7891 (可通过 --port 修改)
 
 Endpoints:

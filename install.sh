@@ -1,7 +1,7 @@
 #!/bin/bash
-# ══════════════════════════════════════════════════════════════
-# 三省六部 · OpenClaw Multi-Agent System 一键安装脚本
-# ══════════════════════════════════════════════════════════════
+# ╔═════════════════════════════════════════════════════════
+# 三智能体 · OpenClaw Multi-Agent System 一键安装脚本
+# ╚═════════════════════════════════════════════════════════
 set -e
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,7 +13,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 banner() {
   echo ""
   echo -e "${BLUE}╔══════════════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║  🏛️  三省六部 · OpenClaw Multi-Agent    ║${NC}"
+  echo -e "${BLUE}║  🏛️  三智能体 · OpenClaw Multi-Agent    ║${NC}"
   echo -e "${BLUE}║       安装向导                            ║${NC}"
   echo -e "${BLUE}╚══════════════════════════════════════════╝${NC}"
   echo ""
@@ -27,7 +27,7 @@ info()  { echo -e "${BLUE}ℹ️  $1${NC}"; }
 # ── Step 0: 依赖检查 ──────────────────────────────────────────
 check_deps() {
   info "检查依赖..."
-  
+
   if ! command -v openclaw &>/dev/null; then
     error "未找到 openclaw CLI。请先安装 OpenClaw: https://openclaw.ai"
     exit 1
@@ -91,8 +91,9 @@ backup_existing() {
 # ── Step 1: 创建 Workspace ──────────────────────────────────
 create_workspaces() {
   info "创建 Agent Workspace..."
-  
-  AGENTS=(taizi zhongshu menxia shangshu hubu libu bingbu xingbu gongbu libu_hr zaochao)
+
+  # 三个智能体
+  AGENTS=(gege goutou heinu)
   for agent in "${AGENTS[@]}"; do
     ws="$OC_HOME/workspace-$agent"
     mkdir -p "$ws/skills"
@@ -114,7 +115,7 @@ create_workspaces() {
 
 1. 接到任务先回复"已接旨"。
 2. 输出必须包含：任务ID、结果、证据/文件路径、阻塞项。
-3. 需要协作时，回复尚书省请求转派，不跨部直连。
+3. 需要协作时，回复其他智能体请求转派。
 4. 涉及删除/外发动作必须明确标注并等待批准。
 AGENTS_EOF
   done
@@ -122,10 +123,10 @@ AGENTS_EOF
 
 # ── Step 2: 注册 Agents ─────────────────────────────────────
 register_agents() {
-  info "注册三省六部 Agents..."
+  info "注册三智能体 Agents..."
 
   # 备份配置
-  cp "$OC_CFG" "$OC_CFG.bak.sansheng-$(date +%Y%m%d-%H%M%S)"
+  cp "$OC_CFG" "$OC_CFG.bak.$(date +%Y%m%d-%H%M%S)"
   log "已备份配置: $OC_CFG.bak.*"
 
   python3 << 'PYEOF'
@@ -134,18 +135,11 @@ import json, pathlib, sys
 cfg_path = pathlib.Path.home() / '.openclaw' / 'openclaw.json'
 cfg = json.loads(cfg_path.read_text())
 
+# 三个智能体配置
 AGENTS = [
-  {"id": "taizi",    "subagents": {"allowAgents": ["zhongshu"]}},
-    {"id": "zhongshu", "subagents": {"allowAgents": ["menxia", "shangshu"]}},
-    {"id": "menxia",   "subagents": {"allowAgents": ["shangshu", "zhongshu"]}},
-  {"id": "shangshu", "subagents": {"allowAgents": ["zhongshu", "menxia", "hubu", "libu", "bingbu", "xingbu", "gongbu", "libu_hr"]}},
-    {"id": "hubu",     "subagents": {"allowAgents": ["shangshu"]}},
-    {"id": "libu",     "subagents": {"allowAgents": ["shangshu"]}},
-    {"id": "bingbu",   "subagents": {"allowAgents": ["shangshu"]}},
-    {"id": "xingbu",   "subagents": {"allowAgents": ["shangshu"]}},
-    {"id": "gongbu",   "subagents": {"allowAgents": ["shangshu"]}},
-  {"id": "libu_hr",  "subagents": {"allowAgents": ["shangshu"]}},
-  {"id": "zaochao",  "subagents": {"allowAgents": []}},
+    {"id": "gege",   "subagents": {"allowAgents": ["goutou"]}},
+    {"id": "goutou", "subagents": {"allowAgents": ["heinu"]}},
+    {"id": "heinu",  "subagents": {"allowAgents": []}},
 ]
 
 agents_cfg = cfg.setdefault('agents', {})
@@ -175,9 +169,9 @@ PYEOF
 # ── Step 3: 初始化 Data ─────────────────────────────────────
 init_data() {
   info "初始化数据目录..."
-  
+
   mkdir -p "$REPO_DIR/data"
-  
+
   # 初始化空文件
   for f in live_status.json agent_config.json model_change_log.json; do
     if [ ! -f "$REPO_DIR/data/$f" ]; then
@@ -190,27 +184,28 @@ init_data() {
   if [ ! -f "$REPO_DIR/data/tasks_source.json" ]; then
     python3 << 'PYEOF'
 import json, pathlib
+
 tasks = [
     {
         "id": "JJC-DEMO-001",
         "title": "🎉 系统初始化完成",
-        "official": "工部尚书",
-        "org": "工部",
+        "official": "狗头",
+        "org": "狗头",
         "state": "Done",
-        "now": "三省六部系统已就绪",
+        "now": "三智能体系统已就绪",
         "eta": "-",
         "block": "无",
         "output": "",
         "ac": "系统正常运行",
         "flow_log": [
-            {"at": "2024-01-01T00:00:00Z", "from": "皇上", "to": "中书省", "remark": "下旨初始化三省六部系统"},
-            {"at": "2024-01-01T00:01:00Z", "from": "中书省", "to": "门下省", "remark": "规划方案提交审核"},
-            {"at": "2024-01-01T00:02:00Z", "from": "门下省", "to": "尚书省", "remark": "✅ 准奏"},
-            {"at": "2024-01-01T00:03:00Z", "from": "尚书省", "to": "工部", "remark": "派发：系统初始化"},
-            {"at": "2024-01-01T00:04:00Z", "from": "工部", "to": "尚书省", "remark": "✅ 完成"},
+            {"at": "2024-01-01T00:00:00Z", "from": "用户", "to": "鸽鸽", "remark": "用户发送消息"},
+            {"at": "2024-01-01T00:01:00Z", "from": "鸽鸽", "to": "狗头", "remark": "转交需求"},
+            {"at": "2024-01-01T00:02:00Z", "from": "狗头", "to": "黑奴", "remark": "派发任务"},
+            {"at": "2024-01-01T00:03:00Z", "from": "黑奴", "to": "狗头", "remark": "任务完成"},
         ]
     }
 ]
+
 p = pathlib.Path(__file__).parent if '__file__' in dir() else pathlib.Path('.')
 # Write to data dir
 import os
@@ -253,10 +248,10 @@ build_frontend() {
 first_sync() {
   info "执行首次数据同步..."
   cd "$REPO_DIR"
-  
+
   REPO_DIR="$REPO_DIR" python3 scripts/sync_agent_config.py || warn "sync_agent_config 有警告"
   python3 scripts/refresh_live_data.py || warn "refresh_live_data 有警告"
-  
+
   log "首次同步完成"
 }
 
@@ -282,9 +277,9 @@ first_sync
 restart_gateway
 
 echo ""
-echo -e "${GREEN}╔══════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║  🎉  三省六部安装完成！                          ║${NC}"
-echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
+echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║  🎉  三智能体安装完成！                          ║${NC}"
+echo -e "${GREEN}╚════════════════════════════════════════════════╝${NC}"
 echo ""
 echo "下一步："
 echo "  1. 启动数据刷新循环:  bash scripts/run_loop.sh &"

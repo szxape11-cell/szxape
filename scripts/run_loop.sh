@@ -41,7 +41,7 @@ SCAN_INTERVAL="${2:-120}"  # 巡检间隔(秒), 默认 120
 SCAN_COUNTER=0
 SCRIPT_TIMEOUT=30  # 单个脚本最大执行时间(秒)
 
-echo "🏛️  三省六部数据刷新循环启动 (PID=$$)"
+echo "🏛️  三智能体数据刷新循环启动 (PID=$$)"
 echo "   脚本目录: $SCRIPT_DIR"
 echo "   间隔: ${INTERVAL}s"
 echo "   巡检间隔: ${SCAN_INTERVAL}s"

@@ -26,18 +26,15 @@ from ..db import Base
 
 
 class TaskState(str, enum.Enum):
-    """任务状态枚举 — 映射三省六部流程。"""
-    Taizi = "Taizi"           # 太子分拣
-    Zhongshu = "Zhongshu"     # 中书省起草
-    Menxia = "Menxia"         # 门下省审议
-    Assigned = "Assigned"     # 尚书省已将任务派发
-    Next = "Next"             # 待执行
-    Doing = "Doing"           # 六部执行中
-    Review = "Review"         # 审查汇总
+    """任务状态枚举 — 映射三智能体流程。"""
+    Created = "Created"       # 初始状态，分配给鸽鸽
+    Planning = "Planning"     # 狗头进行分析和规划
+    Assigned = "Assigned"     # 狗头已派发任务给黑奴
+    Executing = "Executing"   # 黑奴正在执行
+    Review = "Review"         # 狗头审查（用户手动触发）
     Done = "Done"             # 完成
     Blocked = "Blocked"       # 阻塞
     Cancelled = "Cancelled"   # 取消
-    Pending = "Pending"       # 待处理
 
 
 # 终态集合
@@ -45,34 +42,25 @@ TERMINAL_STATES = {TaskState.Done, TaskState.Cancelled}
 
 # 状态流转合法路径
 STATE_TRANSITIONS = {
-    TaskState.Taizi: {TaskState.Zhongshu, TaskState.Cancelled},
-    TaskState.Zhongshu: {TaskState.Menxia, TaskState.Cancelled, TaskState.Blocked},
-    TaskState.Menxia: {TaskState.Assigned, TaskState.Zhongshu, TaskState.Cancelled},  # 封驳退回中书
-    TaskState.Assigned: {TaskState.Doing, TaskState.Next, TaskState.Cancelled, TaskState.Blocked},
-    TaskState.Next: {TaskState.Doing, TaskState.Cancelled},
-    TaskState.Doing: {TaskState.Review, TaskState.Done, TaskState.Blocked, TaskState.Cancelled},
-    TaskState.Review: {TaskState.Done, TaskState.Doing, TaskState.Cancelled},  # 审查不通过退回
-    TaskState.Blocked: {TaskState.Taizi, TaskState.Zhongshu, TaskState.Menxia, TaskState.Assigned, TaskState.Doing},
+    TaskState.Created: {TaskState.Planning, TaskState.Cancelled},
+    TaskState.Planning: {TaskState.Assigned, TaskState.Cancelled, TaskState.Blocked},
+    TaskState.Assigned: {TaskState.Executing, TaskState.Cancelled},
+    TaskState.Executing: {TaskState.Done, TaskState.Blocked, TaskState.Cancelled},
+    TaskState.Review: {TaskState.Done, TaskState.Executing, TaskState.Cancelled},
+    TaskState.Blocked: {TaskState.Planning, TaskState.Executing},
 }
 
 # 状态 → Agent 映射
 STATE_AGENT_MAP = {
-    TaskState.Taizi: "taizi",
-    TaskState.Zhongshu: "zhongshu",
-    TaskState.Menxia: "menxia",
-    TaskState.Assigned: "shangshu",
-    TaskState.Review: "shangshu",
+    TaskState.Created: "gege",
+    TaskState.Planning: "goutou",
+    TaskState.Assigned: "goutou",
+    TaskState.Executing: "heinu",
+    TaskState.Review: "goutou",
 }
 
-# 组织 → Agent 映射（六部）
-ORG_AGENT_MAP = {
-    "户部": "hubu",
-    "礼部": "libu",
-    "兵部": "bingbu",
-    "刑部": "xingbu",
-    "工部": "gongbu",
-    "吏部": "libu_hr",
-}
+# 组织 → Agent 映射（已废弃，保留用于兼容性）
+ORG_AGENT_MAP = {}
 
 
 class Task(Base):
@@ -81,8 +69,8 @@ class Task(Base):
 
     id = Column(String(32), primary_key=True, comment="任务ID, e.g. JJC-20260301-001")
     title = Column(Text, nullable=False, comment="任务标题")
-    state = Column(Enum(TaskState, name="task_state"), nullable=False, default=TaskState.Taizi, index=True)
-    org = Column(String(32), nullable=False, default="太子", comment="当前执行部门")
+    state = Column(Enum(TaskState, name="task_state"), nullable=False, default=TaskState.Created, index=True)
+    org = Column(String(32), nullable=False, default="鸽鸽", comment="当前执行部门")
     official = Column(String(32), default="", comment="责任官员")
     now = Column(Text, default="", comment="当前进展描述")
     eta = Column(String(64), default="-", comment="预计完成时间")

@@ -1,10 +1,9 @@
 """Orchestrator Worker — 消费事件总线，驱动任务状态机。
 
 监听 topic:
-- task.created → 自动派发给太子 agent
-- task.planning.complete → 中书审议完成 → 流转门下
-- task.review.result → 门下审核 → 通过则 Assigned，退回则 Replan
+- task.created → 自动派发给鸽鸽 agent
 - task.status → 处理各种状态变更
+- task.completed → 任务完成
 - task.stalled → 处理停滞任务
 
 这是系统的核心编排器，取代旧架构中 daemon 线程 + 定时扫描的角色。
@@ -123,10 +122,10 @@ class OrchestratorWorker:
             await self._on_task_stalled(payload, trace_id)
 
     async def _on_task_created(self, payload: dict, trace_id: str):
-        """任务创建 → 派发给太子 agent 起草。"""
+        """任务创建 → 派发给鸽鸽 agent 处理。"""
         task_id = payload.get("task_id")
-        state = payload.get("state", "taizi")
-        agent = STATE_AGENT_MAP.get(TaskState(state), "taizi")
+        state = payload.get("state", "Created")
+        agent = STATE_AGENT_MAP.get(TaskState(state), "gege")
 
         await self.bus.publish(
             topic=TOPIC_TASK_DISPATCH,
@@ -154,12 +153,6 @@ class OrchestratorWorker:
 
         # 如果新状态有对应 agent，自动派发
         agent = STATE_AGENT_MAP.get(new_state)
-
-        # 如果进入 assigned 状态，需要查找六部对应 agent
-        if new_state == TaskState.ASSIGNED:
-            # 从 payload 获取 assignee_org
-            org = payload.get("assignee_org", "")
-            agent = ORG_AGENT_MAP.get(org, agent)
 
         if agent:
             await self.bus.publish(

@@ -3,8 +3,8 @@ import { api, type Task } from '../api';
 
 // 排序权重
 const STATE_ORDER: Record<string, number> = {
-  Doing: 0, Review: 1, Assigned: 2, Menxia: 3, Zhongshu: 4,
-  Taizi: 5, Inbox: 6, Blocked: 7, Next: 8, Done: 9, Cancelled: 10,
+  Executing: 0, Review: 1, Assigned: 2, Planning: 3, Created: 4,
+  Blocked: 5, Done: 6, Cancelled: 7,
 };
 
 function MiniPipe({ task }: { task: Task }) {
@@ -211,16 +211,16 @@ export default function EdictBoard() {
         <span className="ab-count">
           活跃 {activeEdicts.length} · 归档 {archivedEdicts.length} · 共 {allEdicts.length}
         </span>
-        <button className="ab-scan" onClick={handleScan}>🧭 太子巡检</button>
+        <button className="ab-scan" onClick={handleScan}>🧭 任务扫描</button>
       </div>
 
       {/* Grid */}
       <div className="edict-grid">
         {edicts.length === 0 ? (
           <div className="empty" style={{ gridColumn: '1/-1' }}>
-            暂无旨意<br />
+            暂无任务<br />
             <small style={{ fontSize: 11, marginTop: 6, display: 'block', color: 'var(--muted)' }}>
-              通过飞书向太子发送任务，太子分拣后转中书省处理
+              向鸽鸽发送消息，鸽鸽会根据需求转交给狗头处理
             </small>
           </div>
         ) : (
